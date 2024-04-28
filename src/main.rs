@@ -572,6 +572,17 @@ impl LocalAPICNMIStructure {
     const TYPE: u8 = 0x04;
 }
 
+#[repr(u8)]
+enum VirtioPCICapabilityType {
+    CommonConfig = 1,
+    NotifyConfig = 2,
+    ISRConfig = 3,
+    DeviceConfig = 4,
+    PCIConfig = 5,
+    SharedMemoryConfig = 8,
+    VendorConfig = 9,
+}
+
 struct ConsoleWriter {
     protocol: *mut EfiSimpleTextOutputProtocol,
 }
@@ -633,6 +644,72 @@ const ARROW_BITMAP: &'static [[u8; 16]; 16] = &[
     *b"   @..@         ",
     *b"    @@          ",
 ];
+
+// Note: in/outはレジスタ指定が固定らしい
+macro_rules! in32 {
+    ($port: expr) => {{
+        let res: u32;
+        core::arch::asm!("in eax, dx", in("dx") $port, out("eax") res, options(nomem, nostack, preserves_flags));
+        res
+    }}
+}
+macro_rules! out32 {
+    ($port: expr, $value: expr) => {
+        core::arch::asm!("out dx, eax", in("dx") $port, in("eax") $value, options(nomem, nostack, preserves_flags));
+    }
+}
+
+struct PCIDeviceIdentifier {
+    bus: u8,
+    slot: u8,
+    function: u8,
+}
+impl PCIDeviceIdentifier {
+    pub fn read_config(&self, dword_offset: u8) -> u32 {
+        let addr = 0x8000_0000
+            | ((self.bus as u32) << 16)
+            | (((self.slot as u32) & 0x1f) << 11)
+            | (((self.function as u32) & 0x07) << 8)
+            | (((dword_offset as u32) & 0x3f) << 2);
+
+        unsafe {
+            out32!(0xcf8, addr);
+            in32!(0xcfc)
+        }
+    }
+
+    pub fn read_device_vendor_ids(&self) -> [u16; 2] {
+        unsafe { core::mem::transmute(self.read_config(0)) }
+    }
+
+    pub fn read_status_command_values(&self) -> [u16; 2] {
+        unsafe { core::mem::transmute(self.read_config(1)) }
+    }
+
+    pub fn read_class_pif_revision_values(&self) -> [u8; 4] {
+        unsafe { core::mem::transmute(self.read_config(2)) }
+    }
+
+    pub fn read_bist_ht_lt_cls_values(&self) -> [u8; 4] {
+        unsafe { core::mem::transmute(self.read_config(3)) }
+    }
+
+    pub fn read_base_address_register(&self, n: u8) -> u32 {
+        self.read_config(4 + n)
+    }
+
+    pub fn read_subsystem_ids(&self) -> [u16; 2] {
+        unsafe { core::mem::transmute(self.read_config(11)) }
+    }
+
+    pub fn read_expansion_rom_base_address(&self) -> u32 {
+        self.read_config(12)
+    }
+
+    pub fn read_capabilities_pointer(&self) -> u8 {
+        (self.read_config(13) & 0xfc) as _
+    }
+}
 
 #[no_mangle]
 fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTable) {
@@ -928,6 +1005,100 @@ fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTab
     };
     if r != 0 {
         panic!("Failed to blt arrow: {r}");
+    }
+
+    for n in 0..32 {
+        let root_device = PCIDeviceIdentifier {
+            bus: 0,
+            slot: n,
+            function: 0,
+        };
+
+        let [vendor_id, device_id] = root_device.read_device_vendor_ids();
+        if vendor_id == 0xffff {
+            continue;
+        }
+        let [x, pif, subclass, cls] = root_device.read_class_pif_revision_values();
+        let [_, _, ht, _] = root_device.read_bist_ht_lt_cls_values();
+        writeln!(
+            &mut con_out,
+            "root pci s#{n}.0: 0x{device_id:04x} 0x{vendor_id:04x} header_type=0x{ht:02x} cls={cls}:{subclass} pif={pif} x={x}"
+        )
+        .unwrap();
+
+        if (ht & 0x80) != 0 {
+            // multifunction
+            for f in 1..8 {
+                let root_device = PCIDeviceIdentifier {
+                    bus: 0,
+                    slot: n,
+                    function: f,
+                };
+
+                let [vendor_id, device_id] = root_device.read_device_vendor_ids();
+                if vendor_id == 0xffff {
+                    continue;
+                }
+                let [x, pif, subclass, cls] = root_device.read_class_pif_revision_values();
+                let [_, _, ht, _] = root_device.read_bist_ht_lt_cls_values();
+                writeln!(
+                    &mut con_out,
+                    "root pci s#{n}.{f}: 0x{device_id:04x} 0x{vendor_id:04x} header_type=0x{ht:02x} cls={cls}:{subclass} pif={pif} x={x}"
+                )
+                .unwrap();
+            }
+        }
+
+        if vendor_id == 0x1234 && device_id == 0x1111 {
+            // QEMU/Bochs VGA Device
+            let fb_address = root_device.read_base_address_register(0);
+            let mmio_base = root_device.read_base_address_register(2);
+            let endian = unsafe { *((mmio_base as usize + 0x0604) as *const u32) };
+            writeln!(
+                &mut con_out,
+                "- VGA: fb=0x{fb_address:08x} mmio=0x{mmio_base:08x} end=0x{endian:08x}"
+            )
+            .unwrap();
+        }
+
+        if vendor_id == 0x1af4 && device_id == 0x1040 + 16 {
+            // virtio-gpu
+            let [_, st] = root_device.read_status_command_values();
+            let cap = root_device.read_capabilities_pointer();
+            writeln!(&mut con_out, "- Virtio GPU: st=0x{st:04x}, cap=0x{cap:02x}").unwrap();
+            let mut cap_pointer = cap;
+            while cap_pointer != 0 {
+                let extra_config = root_device.read_config(cap_pointer >> 2);
+                writeln!(&mut con_out, "- extra config: 0x{extra_config:08x}").unwrap();
+
+                if extra_config & 0xff == 0x09 {
+                    // vendor specific: virtio caps
+                    let rest_blocks = [
+                        root_device.read_config((cap_pointer >> 2) + 1),
+                        root_device.read_config((cap_pointer >> 2) + 2),
+                        root_device.read_config((cap_pointer >> 2) + 3),
+                    ];
+                    let bar = (rest_blocks[0] >> 24) as u8;
+                    let offs = rest_blocks[1];
+                    let len = rest_blocks[2];
+
+                    let cap_type = (extra_config >> 24) as u8;
+                    if cap_type == VirtioPCICapabilityType::CommonConfig as u8 {
+                        writeln!(
+                            &mut con_out,
+                            "  - PCI Common Config at bar #{bar} +{offs} ~{len}"
+                        )
+                        .unwrap();
+                    }
+                    if cap_type == VirtioPCICapabilityType::PCIConfig as u8 {
+                        writeln!(&mut con_out, "  - PCI config at bar #{bar} +{offs} ~{len}")
+                            .unwrap();
+                    }
+                }
+
+                cap_pointer = ((extra_config >> 8) & 0xfc) as u8;
+            }
+        }
     }
 
     loop {}

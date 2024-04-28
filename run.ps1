@@ -9,4 +9,4 @@ if ($LASTEXITCODE -ne 0) {
     throw "cargo build was failed!";
 }
 Copy-Item $RustArtifactPath $BootloaderPath
-qemu-system-x86_64 -drive "if=pflash,format=raw,file=$OvmfPath" -drive "if=ide,index=0,media=disk,format=raw,file=fat:rw:disk"
+qemu-system-x86_64 -drive "if=pflash,format=raw,file=$OvmfPath" -drive "if=ide,index=0,media=disk,format=raw,file=fat:rw:disk" -vga virtio
