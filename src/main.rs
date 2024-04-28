@@ -17,6 +17,7 @@ fn panic_handler<'a, 'b>(info: &'a PanicInfo<'b>) -> ! {
 }
 
 type EfiHandle = *mut core::ffi::c_void;
+type EfiStatus = usize;
 
 #[repr(C)]
 #[derive(PartialEq, Eq)]
@@ -86,7 +87,68 @@ struct EfiSimpleTextOutputProtocol {
 struct EfiRuntimeServices {}
 
 #[repr(C)]
-struct EfiBootServices {}
+struct EfiBootServices {
+    header: EfiTableHeader,
+    // Task Priority Services
+    raise_tpl: *const c_void,
+    restore_tpl: *const c_void,
+    // Memory Services
+    allocate_pages: *const c_void,
+    free_pages: *const c_void,
+    get_memory_map: *const c_void,
+    allocate_pool: *const c_void,
+    free_pool: *const c_void,
+    // Event & Timer Services
+    create_event: *const c_void,
+    set_timer: *const c_void,
+    wait_for_event: *const c_void,
+    signal_event: *const c_void,
+    close_event: *const c_void,
+    check_event: *const c_void,
+    // Protocol Handler Services
+    install_protocol_interface: *const c_void,
+    reinstall_protocol_interface: *const c_void,
+    uninstall_protocol_interface: *const c_void,
+    handle_protocol: *const c_void,
+    _reserved: *const c_void,
+    register_protocol_notify: *const c_void,
+    locate_handle: *const c_void,
+    locate_device_path: *const c_void,
+    install_configuration_table: *const c_void,
+    // Image Services
+    load_image: *const c_void,
+    start_image: *const c_void,
+    exit: *const c_void,
+    unload_image: *const c_void,
+    exit_boot_services: *const c_void,
+    // Miscellaneous Services
+    get_next_monotonic_count: *const c_void,
+    stall: *const c_void,
+    set_watchdog_timer: *const c_void,
+    // Driver Support Services
+    connect_controller: *const c_void,
+    disconnect_controller: *const c_void,
+    // Open and Close Protocol Services
+    open_protocol: *const c_void,
+    close_protocol: *const c_void,
+    open_protocol_information: *const c_void,
+    // Library Services
+    protocols_per_handle: *const c_void,
+    locate_handle_buffer: *const c_void,
+    locate_protocol: extern "system" fn(
+        protocol: *const EfiGuid,
+        registration: *const c_void,
+        interface: *mut *mut c_void,
+    ) -> EfiStatus,
+    install_multiple_protocol_interfaces: *const c_void,
+    uninstall_multiple_protocol_interfaces: *const c_void,
+    // 32-bit CRC Services
+    calculate_crc32: *const c_void,
+    // Miscellaneous Services
+    copy_mem: *const c_void,
+    set_mem: *const c_void,
+    create_event_ex: *const c_void,
+}
 
 #[repr(C)]
 struct EfiConfigurationTable {
@@ -118,6 +180,95 @@ struct EfiMemoryDescriptor {
     virtual_start: u64,
     number_of_pages: u64,
     attribute: u64,
+}
+
+#[repr(C)]
+struct EfiGraphicsOutputProtocol {
+    query_mode: extern "system" fn(
+        this: *mut EfiGraphicsOutputProtocol,
+        mode_number: u32,
+        size_of_info: *mut usize,
+        info: *mut *mut EfiGraphicsOutputModeInformation,
+    ) -> EfiStatus,
+    set_mode:
+        extern "system" fn(this: *mut EfiGraphicsOutputProtocol, mode_number: u32) -> EfiStatus,
+    blt: extern "system" fn(
+        this: *mut EfiGraphicsOutputProtocol,
+        blt_buffer: *mut EfiGraphicsOutputBltPixel,
+        blt_operation: EfiGraphicsOutputBltOperation,
+        source_x: usize,
+        source_y: usize,
+        destination_x: usize,
+        destination_y: usize,
+        width: usize,
+        height: usize,
+        delta: usize,
+    ) -> EfiStatus,
+    mode: *mut EfiGraphicsOutputProtocolMode,
+}
+impl EfiGraphicsOutputProtocol {
+    const GUID: EfiGuid = EfiGuid {
+        data1: 0x9042a9de,
+        data2: 0x23dc,
+        data3: 0x4a38,
+        data4: [0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a],
+    };
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct EfiPixelBitmask {
+    red: u32,
+    green: u32,
+    blue: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+enum EfiGraphicsPixelFormat {
+    RedGreenBlueReserved8BitPerColor,
+    BlueGreenRedReserved8BitPerColor,
+    BitMask,
+    BltOnly,
+    FormatMax,
+}
+
+#[repr(C)]
+struct EfiGraphicsOutputModeInformation {
+    version: u32,
+    horizontal_resolution: u32,
+    vertical_resolution: u32,
+    pixel_format: EfiGraphicsPixelFormat,
+    pixel_information: EfiPixelBitmask,
+    pixels_per_scan_line: u32,
+}
+
+#[repr(C)]
+struct EfiGraphicsOutputProtocolMode {
+    max_mode: u32,
+    mode: u32,
+    info: *const EfiGraphicsOutputModeInformation,
+    size_of_info: usize,
+    frame_buffer_base: u64,
+    frame_buffer_size: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EfiGraphicsOutputBltPixel {
+    blue: u8,
+    green: u8,
+    red: u8,
+    reserved: u8,
+}
+
+#[repr(C)]
+enum EfiGraphicsOutputBltOperation {
+    BltVideoFill,
+    BltVideoToBltBuffer,
+    BltBufferToVideo,
+    BltVideoToVideo,
 }
 
 #[repr(C)]
@@ -464,6 +615,25 @@ impl Write for ConsoleWriter {
     }
 }
 
+const ARROW_BITMAP: &'static [[u8; 16]; 16] = &[
+    *b"@               ",
+    *b"@@              ",
+    *b"@.@             ",
+    *b"@..@            ",
+    *b"@...@           ",
+    *b"@....@          ",
+    *b"@.....@         ",
+    *b"@......@        ",
+    *b"@.......@       ",
+    *b"@........@      ",
+    *b"@@@..@@@@@@     ",
+    *b"  @..@          ",
+    *b"  @..@          ",
+    *b"   @..@         ",
+    *b"   @..@         ",
+    *b"    @@          ",
+];
+
 #[no_mangle]
 fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTable) {
     unsafe {
@@ -495,134 +665,134 @@ fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTab
         )
         .unwrap();
 
-        if cfg.vendor_guid == AcpiRootSystemDescriptionPointer::GUID2 {
-            let s = unsafe { &*(cfg.vendor_table as *mut AcpiRootSystemDescriptionPointer) };
-            if !s.has_correct_signature() {
-                panic!("invalid rsdt signature?");
-            }
-            writeln!(&mut con_out, "ACPI RSDP Structure: {s:?}").unwrap();
+        // if cfg.vendor_guid == AcpiRootSystemDescriptionPointer::GUID2 {
+        //     let s = unsafe { &*(cfg.vendor_table as *mut AcpiRootSystemDescriptionPointer) };
+        //     if !s.has_correct_signature() {
+        //         panic!("invalid rsdt signature?");
+        //     }
+        //     writeln!(&mut con_out, "ACPI RSDP Structure: {s:?}").unwrap();
 
-            if s.revision >= 2 {
-                // acpi 2.0
-                let table = unsafe { s.xsdt() };
-                if !table.has_correct_signature() {
-                    panic!("invalid xsdt table signature?");
-                }
-                writeln!(&mut con_out, "XSDT: {table:?}").unwrap();
-                writeln!(&mut con_out, "- oem_id: {}", unsafe {
-                    core::str::from_utf8_unchecked(&table.oem_id)
-                })
-                .unwrap();
-                for e in table.entries() {
-                    writeln!(&mut con_out, "- entry: {e:016x}").unwrap();
-                    let child_table =
-                        unsafe { &*(*e as usize as *const AcpiSystemDescriptionTableHeader) };
-                    writeln!(&mut con_out, "  - sig: {}", child_table.signature_str()).unwrap();
+        //     if s.revision >= 2 {
+        //         // acpi 2.0
+        //         let table = unsafe { s.xsdt() };
+        //         if !table.has_correct_signature() {
+        //             panic!("invalid xsdt table signature?");
+        //         }
+        //         writeln!(&mut con_out, "XSDT: {table:?}").unwrap();
+        //         writeln!(&mut con_out, "- oem_id: {}", unsafe {
+        //             core::str::from_utf8_unchecked(&table.oem_id)
+        //         })
+        //         .unwrap();
+        //         for e in table.entries() {
+        //             writeln!(&mut con_out, "- entry: {e:016x}").unwrap();
+        //             let child_table =
+        //                 unsafe { &*(*e as usize as *const AcpiSystemDescriptionTableHeader) };
+        //             writeln!(&mut con_out, "  - sig: {}", child_table.signature_str()).unwrap();
 
-                    if child_table.signature == AcpiFixedDescriptionTable::SIGNATURE {
-                        let fixed_dt = unsafe {
-                            &*(child_table as *const _ as *const AcpiFixedDescriptionTable)
-                        };
-                        writeln!(&mut con_out, "  - fixed table: {fixed_dt:?}").unwrap();
-                    }
+        //             if child_table.signature == AcpiFixedDescriptionTable::SIGNATURE {
+        //                 let fixed_dt = unsafe {
+        //                     &*(child_table as *const _ as *const AcpiFixedDescriptionTable)
+        //                 };
+        //                 writeln!(&mut con_out, "  - fixed table: {fixed_dt:?}").unwrap();
+        //             }
 
-                    if child_table.signature == AcpiMultipleAPICDescriptionTable::SIGNATURE {
-                        let t = unsafe {
-                            &*(child_table as *const _ as *const AcpiMultipleAPICDescriptionTable)
-                        };
-                        writeln!(
-                            &mut con_out,
-                            "  - local interrupt controller address: 0x{:08x}",
-                            t.local_interrupt_controller_address
-                        )
-                        .unwrap();
-                        writeln!(&mut con_out, "  - flags: {:?}", t.flags).unwrap();
+        //             if child_table.signature == AcpiMultipleAPICDescriptionTable::SIGNATURE {
+        //                 let t = unsafe {
+        //                     &*(child_table as *const _ as *const AcpiMultipleAPICDescriptionTable)
+        //                 };
+        //                 writeln!(
+        //                     &mut con_out,
+        //                     "  - local interrupt controller address: 0x{:08x}",
+        //                     t.local_interrupt_controller_address
+        //                 )
+        //                 .unwrap();
+        //                 writeln!(&mut con_out, "  - flags: {:?}", t.flags).unwrap();
 
-                        let ic = t.interrupt_controller_structure_bytes();
-                        let mut ic_ptr = 0;
-                        while ic_ptr < ic.len() {
-                            let head = ic_ptr;
-                            let type_byte = ic[ic_ptr];
-                            ic_ptr += 1;
-                            let length = ic[ic_ptr];
-                            ic_ptr += 1;
-                            writeln!(
-                                &mut con_out,
-                                "  - interrupt controller: 0x{type_byte:02x} len={length}"
-                            )
-                            .unwrap();
-                            match type_byte {
-                                ProcessorLocalAPICStructure::TYPE => {
-                                    let s = unsafe {
-                                        &*(ic.as_ptr().add(head)
-                                            as *const ProcessorLocalAPICStructure)
-                                    };
-                                    writeln!(
-                                        &mut con_out,
-                                        "    - processor_uid={},id={},flags={:x}",
-                                        s.acpi_processor_uid, s.apic_id, s.flags
-                                    )
-                                    .unwrap();
-                                }
-                                IOAPICStructure::TYPE => {
-                                    let s = unsafe {
-                                        &*(ic.as_ptr().add(head) as *const IOAPICStructure)
-                                    };
-                                    writeln!(
-                                        &mut con_out,
-                                        "    - id={},addr=0x{:08x},gsi_base={}",
-                                        s.io_apic_id,
-                                        s.io_apic_address,
-                                        s.global_system_interrupt_base
-                                    )
-                                    .unwrap();
-                                }
-                                InterruptSourceOverrideStructure::TYPE => {
-                                    let s = unsafe {
-                                        &*(ic.as_ptr().add(head)
-                                            as *const InterruptSourceOverrideStructure)
-                                    };
-                                    writeln!(
-                                        &mut con_out,
-                                        "    - bus={},source={},gsi={},flags={:?}",
-                                        s.bus, s.source, s.global_system_interrupt, s.flags
-                                    )
-                                    .unwrap();
-                                }
-                                LocalAPICNMIStructure::TYPE => {
-                                    let s = unsafe {
-                                        &*(ic.as_ptr().add(head) as *const LocalAPICNMIStructure)
-                                    };
-                                    writeln!(
-                                        &mut con_out,
-                                        "    - processor_uid={},flags={:?},lint={}",
-                                        s.acpi_processor_uid, s.flags, s.local_apic_lint_number
-                                    )
-                                    .unwrap();
-                                }
-                                _ => (),
-                            }
-                            ic_ptr += length as usize - 2;
-                        }
-                    }
-                }
-            } else {
-                let table =
-                    unsafe { &*(s.rsdt_address as usize as *mut AcpiRootSystemDescriptionTable) };
-                if !table.has_correct_signature() {
-                    panic!("invalid rsdt table signature?");
-                }
+        //                 let ic = t.interrupt_controller_structure_bytes();
+        //                 let mut ic_ptr = 0;
+        //                 while ic_ptr < ic.len() {
+        //                     let head = ic_ptr;
+        //                     let type_byte = ic[ic_ptr];
+        //                     ic_ptr += 1;
+        //                     let length = ic[ic_ptr];
+        //                     ic_ptr += 1;
+        //                     writeln!(
+        //                         &mut con_out,
+        //                         "  - interrupt controller: 0x{type_byte:02x} len={length}"
+        //                     )
+        //                     .unwrap();
+        //                     match type_byte {
+        //                         ProcessorLocalAPICStructure::TYPE => {
+        //                             let s = unsafe {
+        //                                 &*(ic.as_ptr().add(head)
+        //                                     as *const ProcessorLocalAPICStructure)
+        //                             };
+        //                             writeln!(
+        //                                 &mut con_out,
+        //                                 "    - processor_uid={},id={},flags={:x}",
+        //                                 s.acpi_processor_uid, s.apic_id, s.flags
+        //                             )
+        //                             .unwrap();
+        //                         }
+        //                         IOAPICStructure::TYPE => {
+        //                             let s = unsafe {
+        //                                 &*(ic.as_ptr().add(head) as *const IOAPICStructure)
+        //                             };
+        //                             writeln!(
+        //                                 &mut con_out,
+        //                                 "    - id={},addr=0x{:08x},gsi_base={}",
+        //                                 s.io_apic_id,
+        //                                 s.io_apic_address,
+        //                                 s.global_system_interrupt_base
+        //                             )
+        //                             .unwrap();
+        //                         }
+        //                         InterruptSourceOverrideStructure::TYPE => {
+        //                             let s = unsafe {
+        //                                 &*(ic.as_ptr().add(head)
+        //                                     as *const InterruptSourceOverrideStructure)
+        //                             };
+        //                             writeln!(
+        //                                 &mut con_out,
+        //                                 "    - bus={},source={},gsi={},flags={:?}",
+        //                                 s.bus, s.source, s.global_system_interrupt, s.flags
+        //                             )
+        //                             .unwrap();
+        //                         }
+        //                         LocalAPICNMIStructure::TYPE => {
+        //                             let s = unsafe {
+        //                                 &*(ic.as_ptr().add(head) as *const LocalAPICNMIStructure)
+        //                             };
+        //                             writeln!(
+        //                                 &mut con_out,
+        //                                 "    - processor_uid={},flags={:?},lint={}",
+        //                                 s.acpi_processor_uid, s.flags, s.local_apic_lint_number
+        //                             )
+        //                             .unwrap();
+        //                         }
+        //                         _ => (),
+        //                     }
+        //                     ic_ptr += length as usize - 2;
+        //                 }
+        //             }
+        //         }
+        //     } else {
+        //         let table =
+        //             unsafe { &*(s.rsdt_address as usize as *mut AcpiRootSystemDescriptionTable) };
+        //         if !table.has_correct_signature() {
+        //             panic!("invalid rsdt table signature?");
+        //         }
 
-                writeln!(&mut con_out, "RSDT: {table:?}").unwrap();
-                writeln!(&mut con_out, "- oem_id: {}", unsafe {
-                    core::str::from_utf8_unchecked(&table.oem_id)
-                })
-                .unwrap();
-                for e in table.entries() {
-                    writeln!(&mut con_out, "- entry: {e:08x}").unwrap();
-                }
-            }
-        }
+        //         writeln!(&mut con_out, "RSDT: {table:?}").unwrap();
+        //         writeln!(&mut con_out, "- oem_id: {}", unsafe {
+        //             core::str::from_utf8_unchecked(&table.oem_id)
+        //         })
+        //         .unwrap();
+        //         for e in table.entries() {
+        //             writeln!(&mut con_out, "- entry: {e:08x}").unwrap();
+        //         }
+        //     }
+        // }
 
         if cfg.vendor_guid == EfiMemoryAttributeTable::GUID {
             let table = cfg.vendor_table as *mut EfiMemoryAttributeTable;
@@ -650,6 +820,114 @@ fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTab
             //     .unwrap();
             // }
         }
+    }
+
+    let mut gop = core::ptr::null_mut::<EfiGraphicsOutputProtocol>();
+    let r = unsafe {
+        ((&*(&*system_table).boot_services).locate_protocol)(
+            &EfiGraphicsOutputProtocol::GUID,
+            core::ptr::null(),
+            &mut gop as *mut _ as _,
+        )
+    };
+    if r != 0 {
+        panic!("Failed to locate gop: {r}");
+    }
+
+    let current_info = unsafe { &*(&*((&*gop).mode)).info };
+    writeln!(&mut con_out, "current graphics mode:").unwrap();
+    writeln!(
+        &mut con_out,
+        "- res: {}x{}",
+        current_info.horizontal_resolution, current_info.vertical_resolution
+    )
+    .unwrap();
+    writeln!(
+        &mut con_out,
+        "- pixel format: {:?} bitmask={:?}",
+        current_info.pixel_format, current_info.pixel_information
+    )
+    .unwrap();
+    writeln!(
+        &mut con_out,
+        "- pixels per scan-line: {}",
+        current_info.pixels_per_scan_line
+    )
+    .unwrap();
+
+    writeln!(&mut con_out, "Enumerating graphics mode:").unwrap();
+    for n in 0..unsafe { (&*(&*gop).mode).max_mode } {
+        let mut info = core::ptr::null_mut::<EfiGraphicsOutputModeInformation>();
+        let mut info_size = core::mem::size_of::<EfiGraphicsOutputModeInformation>();
+        let r = unsafe { ((&*gop).query_mode)(gop, n, &mut info_size, &mut info) };
+        if r != 0 {
+            panic!("Failed to query mode: {r}");
+        }
+
+        let info = unsafe { &*info };
+        writeln!(
+            &mut con_out,
+            "- #{n}: {}x{} {:?} {:?} {}",
+            info.horizontal_resolution,
+            info.vertical_resolution,
+            info.pixel_format,
+            info.pixel_information,
+            info.pixels_per_scan_line
+        )
+        .unwrap();
+    }
+
+    // let r = unsafe { ((*gop).set_mode)(gop, 0) };
+    // if r != 0 {
+    //     panic!("Unable to set graphics mode: {r}");
+    // }
+
+    let mut arrow_blt_buffer = [EfiGraphicsOutputBltPixel {
+        red: 0,
+        green: 0,
+        blue: 0,
+        reserved: 0,
+    }; 16 * 16];
+    for (y, r) in ARROW_BITMAP.into_iter().enumerate() {
+        for (x, c) in r.into_iter().enumerate() {
+            arrow_blt_buffer[x + y * 16] = match c {
+                b'@' => EfiGraphicsOutputBltPixel {
+                    red: 0,
+                    green: 0,
+                    blue: 0,
+                    reserved: 255,
+                },
+                b'.' => EfiGraphicsOutputBltPixel {
+                    red: 255,
+                    green: 255,
+                    blue: 255,
+                    reserved: 255,
+                },
+                _ => EfiGraphicsOutputBltPixel {
+                    red: 0,
+                    green: 128,
+                    blue: 128,
+                    reserved: 255,
+                },
+            };
+        }
+    }
+    let r = unsafe {
+        ((*gop).blt)(
+            gop,
+            arrow_blt_buffer.as_mut_ptr(),
+            EfiGraphicsOutputBltOperation::BltBufferToVideo,
+            0,
+            0,
+            0,
+            0,
+            16,
+            16,
+            0,
+        )
+    };
+    if r != 0 {
+        panic!("Failed to blt arrow: {r}");
     }
 
     loop {}
