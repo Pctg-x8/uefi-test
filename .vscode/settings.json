@@ -1,9 +1,21 @@
 {
   "rust-analyzer.cargo.target": "x86_64-unknown-uefi",
+  "rust-analyzer.cargo.allTargets": false,
   "editor.formatOnSave": true,
   "cSpell.words": [
+    "acpi",
     "APIC",
     "Bitmask",
-    "uninit"
+    "dsdt",
+    "FACP",
+    "fadt",
+    "iapc",
+    "msix",
+    "pstate",
+    "repr",
+    "rsdt",
+    "uninit",
+    "virtio",
+    "xsdt"
   ]
 }
