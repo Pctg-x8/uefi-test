@@ -2,7 +2,7 @@ use crate::uefi::EfiGuid;
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AcpiRootSystemDescriptionPointer {
+pub struct RootSystemDescriptionPointer {
     pub signature: u64,
     pub checksum: u8,
     pub oem_id: [u8; 6],
@@ -13,7 +13,7 @@ pub struct AcpiRootSystemDescriptionPointer {
     pub extended_checksum: u8,
     _reserved: [u8; 3],
 }
-impl AcpiRootSystemDescriptionPointer {
+impl RootSystemDescriptionPointer {
     pub const GUID_V2: EfiGuid = EfiGuid {
         data1: 0x8868e871,
         data2: 0xe4f1,
@@ -26,14 +26,14 @@ impl AcpiRootSystemDescriptionPointer {
     }
 
     #[inline]
-    pub const unsafe fn xsdt(&self) -> &AcpiExtendedSystemDescriptionTable {
-        &*(self.xsdt_address as usize as *const AcpiExtendedSystemDescriptionTable)
+    pub const unsafe fn xsdt(&self) -> &ExtendedSystemDescriptionTable {
+        &*(self.xsdt_address as usize as *const ExtendedSystemDescriptionTable)
     }
 }
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AcpiRootSystemDescriptionTable {
+pub struct RootSystemDescriptionTable {
     pub signature: u32,
     pub length: u32,
     pub revision: u8,
@@ -46,7 +46,7 @@ pub struct AcpiRootSystemDescriptionTable {
     pub creator_revision: u32,
     entry: [u32; 0],
 }
-impl AcpiRootSystemDescriptionTable {
+impl RootSystemDescriptionTable {
     pub fn has_correct_signature(&self) -> bool {
         self.signature == u32::from_le_bytes(*b"RSDT")
     }
@@ -58,7 +58,7 @@ impl AcpiRootSystemDescriptionTable {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AcpiExtendedSystemDescriptionTable {
+pub struct ExtendedSystemDescriptionTable {
     pub signature: u32,
     pub length: u32,
     pub revision: u8,
@@ -71,7 +71,7 @@ pub struct AcpiExtendedSystemDescriptionTable {
     // Note: offset=36に配置する必要があるのでアラインメントを4にしないといけない（u64だと8でずれる）
     entry: [[u32; 2]; 0],
 }
-impl AcpiExtendedSystemDescriptionTable {
+impl ExtendedSystemDescriptionTable {
     pub fn has_correct_signature(&self) -> bool {
         self.signature == u32::from_le_bytes(*b"XSDT")
     }
@@ -85,7 +85,7 @@ impl AcpiExtendedSystemDescriptionTable {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AcpiSystemDescriptionTableHeader {
+pub struct SystemDescriptionTableHeader {
     pub signature: u32,
     pub length: u32,
     pub revision: u8,
@@ -97,7 +97,8 @@ pub struct AcpiSystemDescriptionTableHeader {
     pub creator_id: u32,
     pub creator_revision: u32,
 }
-impl AcpiSystemDescriptionTableHeader {
+impl SystemDescriptionTableHeader {
+    #[inline]
     pub fn signature_str(&self) -> &str {
         unsafe {
             core::str::from_utf8_unchecked(core::mem::transmute::<_, &[u8; 4]>(&self.signature))
@@ -107,8 +108,8 @@ impl AcpiSystemDescriptionTableHeader {
 
 #[repr(C)]
 #[derive(Debug)]
-pub struct AcpiFixedDescriptionTable {
-    pub header: AcpiSystemDescriptionTableHeader,
+pub struct FixedDescriptionTable {
+    pub header: SystemDescriptionTableHeader,
     pub firmware_ctrl: u32,
     pub dsdt: u32,
     _reserved: u8,
@@ -170,18 +171,18 @@ pub struct AcpiFixedDescriptionTable {
     // Note: for 4-byte alignment
     pub hypervisor_vendor_identity: [u32; 2],
 }
-impl AcpiFixedDescriptionTable {
+impl FixedDescriptionTable {
     pub const SIGNATURE: u32 = u32::from_ne_bytes(*b"FACP");
 }
 
 #[repr(C)]
-pub struct AcpiMultipleAPICDescriptionTable {
-    pub header: AcpiSystemDescriptionTableHeader,
+pub struct MultipleAPICDescriptionTable {
+    pub header: SystemDescriptionTableHeader,
     pub local_interrupt_controller_address: u32,
     pub flags: MultipleAPICDescriptionTableFlags,
     interrupt_controller_structure: [u8; 0],
 }
-impl AcpiMultipleAPICDescriptionTable {
+impl MultipleAPICDescriptionTable {
     pub const SIGNATURE: u32 = u32::from_ne_bytes(*b"APIC");
 
     pub fn interrupt_controller_structure_bytes(&self) -> &[u8] {

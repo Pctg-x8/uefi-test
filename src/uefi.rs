@@ -1,7 +1,7 @@
 use core::ffi::c_void;
 
-type EfiHandle = *mut core::ffi::c_void;
-type EfiStatus = usize;
+pub type EfiHandle = *mut core::ffi::c_void;
+pub type EfiStatus = usize;
 
 #[repr(C)]
 #[derive(PartialEq, Eq)]
@@ -86,7 +86,13 @@ pub struct EfiBootServices {
     // Memory Services
     pub allocate_pages: *const c_void,
     pub free_pages: *const c_void,
-    pub get_memory_map: *const c_void,
+    pub get_memory_map: extern "system" fn(
+        memory_map_size: *mut usize,
+        memory_map: *mut EfiMemoryDescriptor,
+        map_key: *mut usize,
+        descriptor_size: *mut usize,
+        descriptor_version: *mut u32,
+    ) -> EfiStatus,
     pub allocate_pool: *const c_void,
     pub free_pool: *const c_void,
     // Event & Timer Services
@@ -111,7 +117,8 @@ pub struct EfiBootServices {
     pub start_image: *const c_void,
     pub exit: *const c_void,
     pub unload_image: *const c_void,
-    pub exit_boot_services: *const c_void,
+    pub exit_boot_services:
+        extern "system" fn(image_handle: EfiHandle, map_key: usize) -> EfiStatus,
     // Miscellaneous Services
     pub get_next_monotonic_count: *const c_void,
     pub stall: *const c_void,
