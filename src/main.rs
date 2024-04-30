@@ -583,6 +583,30 @@ enum VirtioPCICapabilityType {
     VendorConfig = 9,
 }
 
+#[repr(C)]
+#[derive(Debug)]
+struct VirtioCommonConfiguration {
+    device_feature_select: u32,
+    device_feature: u32,
+    driver_feature_select: u32,
+    driver_feature: u32,
+    config_msix_vector: u16,
+    num_queues: u16,
+    device_status: u8,
+    config_generation: u8,
+    // About a specific virtqueue
+    queue_select: u16,
+    queue_size: u16,
+    queue_msix_vector: u16,
+    queue_enable: u16,
+    queue_notify_off: u16,
+    queue_desc: u64,
+    queue_driver: u64,
+    queue_device: u64,
+    queue_notify_data: u16,
+    queue_reset: u16,
+}
+
 struct ConsoleWriter {
     protocol: *mut EfiSimpleTextOutputProtocol,
 }
@@ -1071,16 +1095,39 @@ fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTab
                 let extra_config = root_device.read_config(cap_pointer >> 2);
                 writeln!(&mut con_out, "- extra config: 0x{extra_config:08x}").unwrap();
 
-                if extra_config & 0xff == 0x09 {
-                    // vendor specific: virtio caps
-                    let rest_blocks = [
+                if extra_config & 0xff == 0x11 {
+                    // msi-x caps
+                    let message_control = (extra_config >> 16) as u16;
+                    let (table_address, pending_bit_array_address) = (
                         root_device.read_config((cap_pointer >> 2) + 1),
                         root_device.read_config((cap_pointer >> 2) + 2),
+                    );
+
+                    writeln!(
+                        &mut con_out,
+                        "  - msi-x message control: 0x{message_control:04x}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut con_out,
+                        "  - msi-x table address: 0x{table_address:08x}"
+                    )
+                    .unwrap();
+                    writeln!(
+                        &mut con_out,
+                        "  - msi-x pending bit array address: 0x{pending_bit_array_address:08x}"
+                    )
+                    .unwrap();
+                }
+                if extra_config & 0xff == 0x09 {
+                    // vendor specific: virtio caps
+                    let ([_, _, _id, bar], offs, len) = (
+                        root_device
+                            .read_config((cap_pointer >> 2) + 1)
+                            .to_le_bytes(),
+                        root_device.read_config((cap_pointer >> 2) + 2),
                         root_device.read_config((cap_pointer >> 2) + 3),
-                    ];
-                    let bar = (rest_blocks[0] >> 24) as u8;
-                    let offs = rest_blocks[1];
-                    let len = rest_blocks[2];
+                    );
 
                     let cap_type = (extra_config >> 24) as u8;
                     if cap_type == VirtioPCICapabilityType::CommonConfig as u8 {
@@ -1089,10 +1136,22 @@ fn efi_main(_efi_handle: *mut core::ffi::c_void, system_table: *mut EfiSystemTab
                             "  - PCI Common Config at bar #{bar} +{offs} ~{len}"
                         )
                         .unwrap();
-                    }
-                    if cap_type == VirtioPCICapabilityType::PCIConfig as u8 {
-                        writeln!(&mut con_out, "  - PCI config at bar #{bar} +{offs} ~{len}")
+
+                        for n in 0..6 {
+                            writeln!(
+                                &mut con_out,
+                                "  - bar #{n}: 0x{:08x}",
+                                root_device.read_base_address_register(n as _)
+                            )
                             .unwrap();
+                        }
+
+                        let common_config = unsafe {
+                            &mut *((root_device.read_base_address_register(bar) + offs) as usize
+                                as *mut VirtioCommonConfiguration)
+                        };
+                        writeln!(&mut con_out, "  - ptr: {common_config:p}").unwrap();
+                        writeln!(&mut con_out, "  - cfg: {common_config:?}").unwrap();
                     }
                 }
 
