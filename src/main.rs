@@ -5,9 +5,11 @@ use core::{fmt::Write, panic::PanicInfo};
 
 mod acpi;
 mod asm;
+mod hires_console;
 mod pci;
 mod uefi;
 mod virtio;
+use hires_console::HiResConsole;
 
 static mut SYSTEM_TABLE: *mut uefi::EfiSystemTable = core::ptr::null_mut();
 
@@ -266,6 +268,60 @@ fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable
         }
     }
 
+    // setup hires console
+    let mut gop = core::ptr::null_mut::<uefi::EfiGraphicsOutputProtocol>();
+    let r = unsafe {
+        ((&*system_table.boot_services).locate_protocol)(
+            &uefi::EfiGraphicsOutputProtocol::GUID,
+            core::ptr::null(),
+            &mut gop as *mut _ as _,
+        )
+    };
+    if r != 0 {
+        panic!("Failed to locate gop: 0x{r:016x}");
+    }
+    let gop = unsafe { &mut *gop };
+
+    let Some((preferred_mode, mode_info)) = (0..gop.mode().max_mode)
+        .map(|n| {
+            let mut info = core::ptr::null_mut::<uefi::EfiGraphicsOutputModeInformation>();
+            let mut info_size = core::mem::size_of::<uefi::EfiGraphicsOutputModeInformation>();
+            let r = gop.query_mode(n, &mut info_size, &mut info);
+            if r != 0 {
+                panic!("Failed to query mode: {r}");
+            }
+
+            (n, unsafe { &*info })
+        })
+        .filter(|(_, x)| {
+            (640..=1280).contains(&x.horizontal_resolution)
+                && (x.pixel_format
+                    == uefi::EfiGraphicsPixelFormat::BlueGreenRedReserved8BitPerColor
+                    || x.pixel_format
+                        == uefi::EfiGraphicsPixelFormat::RedGreenBlueReserved8BitPerColor)
+        })
+        .max_by_key(|(_, x)| (x.horizontal_resolution, x.vertical_resolution))
+    else {
+        panic!("no preferred graphics mode found");
+    };
+    let r = gop.set_mode(preferred_mode);
+    if r != 0 {
+        panic!("Failed to set graphics mode: 0x{r:016x}");
+    }
+
+    let framebuffer_base = unsafe {
+        core::slice::from_raw_parts_mut(
+            gop.mode().frame_buffer_base as usize as *mut [u8; 4],
+            gop.mode().frame_buffer_size / 4,
+        )
+    };
+    let framebuffer_stride = mode_info.pixels_per_scan_line;
+    let mut hrc = HiResConsole::new(
+        framebuffer_base,
+        framebuffer_stride,
+        mode_info.vertical_resolution,
+    );
+
     let mut memory_map_size = 0;
     let mut memory_map = [];
     let mut map_key = 0;
@@ -289,10 +345,8 @@ fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable
         panic!("ExitBootServices failed: 0x{r:016x}");
     }
 
-    // TODO: ここでconsole outが使えなくなるので自前描画をし始めないといけない......
-
     let apic_base = unsafe { rdmsr!(0x1b) };
-    writeln!(&mut con_out, "apic_base register: 0x{apic_base:016x}").unwrap();
+    writeln!(&mut hrc, "apic_base register: 0x{apic_base:016x}").unwrap();
 
     loop {}
 
