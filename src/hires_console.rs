@@ -92,7 +92,11 @@ impl HiResConsole {
 impl Write for HiResConsole {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
         for c in s.chars() {
-            self.write_char(c);
+            if c == '\n' {
+                self.newline();
+            } else {
+                self.write_char(c);
+            }
         }
 
         Ok(())

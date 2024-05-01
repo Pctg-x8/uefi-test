@@ -12,9 +12,18 @@ mod virtio;
 use hires_console::HiResConsole;
 
 static mut SYSTEM_TABLE: *mut uefi::EfiSystemTable = core::ptr::null_mut();
+static mut HIRES_CONSOLE: *mut HiResConsole = core::ptr::null_mut();
 
 #[panic_handler]
 fn panic_handler<'a, 'b>(info: &'a PanicInfo<'b>) -> ! {
+    let hires_console = unsafe { HIRES_CONSOLE };
+    if !hires_console.is_null() {
+        // use hires console as output
+        writeln!(unsafe { &mut *hires_console }, "[PANIC OCCURRED] {info}").unwrap();
+
+        loop {}
+    }
+
     let mut con_out = ConsoleWriter {
         protocol: unsafe { (*SYSTEM_TABLE).con_out },
     };
@@ -85,6 +94,341 @@ const ARROW_BITMAP: &'static [[u8; 16]; 16] = &[
     *b"   @..@         ",
     *b"    @@          ",
 ];
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct SegmentDescriptor(pub u64);
+impl SegmentDescriptor {
+    pub const fn new() -> Self {
+        Self(0)
+    }
+
+    pub const fn new_64bit_hi_base(base_hi32: u32) -> Self {
+        Self(base_hi32 as _)
+    }
+
+    pub const fn base_address(self, a: u32) -> Self {
+        let base_addr_lo16 = (a & 0xffff) as u64;
+        let base_addr_md8 = ((a >> 16) & 0xff) as u64;
+        let base_addr_hi8 = ((a >> 24) & 0xff) as u64;
+        const CLEAR_MASK: u64 = !0xff00_00ff_ffff_0000;
+
+        Self(
+            (self.0 & CLEAR_MASK)
+                | (base_addr_hi8 << 56)
+                | (base_addr_md8 << 32)
+                | (base_addr_lo16 << 16),
+        )
+    }
+
+    pub const fn limit(self, lim: u32, large: bool) -> Self {
+        let lim_lo16 = (lim & 0xffff) as u64;
+        let lim_hi4 = ((lim >> 16) & 0x0f) as u64;
+        let large_bit = if large { 1u64 } else { 0u64 };
+        const CLEAR_MASK: u64 = !0x008f_0000_0000_ffff;
+
+        Self((self.0 & CLEAR_MASK) | (lim_lo16) | (lim_hi4 << 48) | (large_bit << 55))
+    }
+
+    pub const fn present(self) -> Self {
+        Self(self.0 | (1u64 << 47))
+    }
+
+    pub const fn privilege_level(self, level: u8) -> Self {
+        let level = (level & 0x03) as u64;
+        const CLEAR_MASK: u64 = !0x0000_6000_0000_0000;
+
+        Self((self.0 & CLEAR_MASK) | (level << 45))
+    }
+
+    pub const fn r#type(self, r#type: u8) -> Self {
+        let r#type = (r#type & 0x0f) as u64;
+        const CLEAR_MASK: u64 = !0x0000_0f00_0000_0000;
+
+        Self((self.0 & CLEAR_MASK) | (r#type << 40))
+    }
+
+    pub const fn code_64bit(self) -> Self {
+        Self(self.0 | (1 << 53))
+    }
+
+    pub const fn default_operation_32bit(self) -> Self {
+        Self(self.0 | (1 << 54))
+    }
+
+    pub const fn for_normal_code_data_segment(self) -> Self {
+        Self(self.0 | (1 << 44))
+    }
+}
+
+const GDT_PLACEMENT: *mut SegmentDescriptor = 0x0010_0000 as usize as _;
+const GDT_ENTRY_COUNT: u16 = 8192;
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct SegmentSelector(pub u16);
+impl SegmentSelector {
+    pub const fn global(index: u16) -> Self {
+        Self(index << 3)
+    }
+
+    pub const fn local(index: u16) -> Self {
+        Self((index << 3) | (1 << 2))
+    }
+
+    pub const fn requested_privilege_level(self, level: u8) -> Self {
+        Self((self.0 & !0x03) | (level as u16 & 0x03))
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct InterruptGateDescriptor(pub [u64; 2]);
+impl InterruptGateDescriptor {
+    pub const EMPTY: Self = Self([0; 2]);
+
+    pub const fn new_interrupt(segment: SegmentSelector, addr: u64) -> Self {
+        let (addr_hi16, addr_lo16) = ((addr >> 16) & 0xffff, addr & 0xffff);
+
+        Self([
+            addr >> 32,
+            (addr_hi16 << 48) | (0b00110000 << 37) | ((segment.0 as u64) << 16) | (addr_lo16),
+        ])
+        .present()
+    }
+
+    pub const fn privilege_level(self, level: u8) -> Self {
+        let level = (level & 0x03) as u64;
+        const CLEAR_MASK: u64 = !0x0000_6000_0000_0000;
+
+        Self([self.0[0], (self.0[1] & CLEAR_MASK) | (level << 45)])
+    }
+
+    pub const fn present(self) -> Self {
+        Self([self.0[0], self.0[1] | (1 << 47)])
+    }
+
+    pub const fn size_32bit(self) -> Self {
+        Self([self.0[0], self.0[1] | (1 << 43)])
+    }
+}
+
+// Note: {pointer}::addは使えなかった（コンパイルエラーになる）
+const IDT_PLACEMENT: *mut InterruptGateDescriptor = unsafe {
+    (core::mem::transmute::<_, usize>(GDT_PLACEMENT)
+        + core::mem::size_of::<SegmentDescriptor>() * GDT_ENTRY_COUNT as usize) as _
+};
+const IDT_ENTRY_COUNT: u16 = 256;
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct ControlRegister3(pub u64);
+impl ControlRegister3 {
+    pub const fn new(paging_root_table_phys_address: u64) -> Self {
+        assert!(
+            paging_root_table_phys_address & 0xfff == 0,
+            "paging root table is not aligned by 4k"
+        );
+
+        Self(paging_root_table_phys_address & !0xfff)
+    }
+
+    pub const fn write_through(self) -> Self {
+        Self(self.0 | (1 << 3))
+    }
+
+    pub const fn cache_disable(self) -> Self {
+        Self(self.0 | (1 << 4))
+    }
+
+    pub fn store(self) {
+        unsafe { store_cr!(3, self.0) }
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PML4Entry(pub u64);
+impl PML4Entry {
+    pub const EMPTY: Self = Self(0);
+
+    #[inline]
+    pub const fn new(page_directory_pointer_table_phys_address: u64) -> Self {
+        assert!(
+            page_directory_pointer_table_phys_address & 0xfff == 0,
+            "page directory pointer table is not aligned by 4k"
+        );
+
+        // set with present flag
+        Self((page_directory_pointer_table_phys_address & !0xfff) | 0x01)
+    }
+
+    #[inline]
+    pub const fn writable(self) -> Self {
+        Self(self.0 | 0x02)
+    }
+
+    #[inline]
+    pub const fn allow_user(self) -> Self {
+        Self(self.0 | 0x04)
+    }
+
+    #[inline]
+    pub const fn write_through(self) -> Self {
+        Self(self.0 | 0x08)
+    }
+
+    #[inline]
+    pub const fn cache_disable(self) -> Self {
+        Self(self.0 | 0x10)
+    }
+
+    #[inline]
+    pub const fn execute_disable(self) -> Self {
+        Self(self.0 | 0x8000_0000_0000_0000)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PageDirectoryPointerTableEntry(pub u64);
+impl PageDirectoryPointerTableEntry {
+    pub const EMPTY: Self = Self(0);
+
+    #[inline]
+    pub const fn new(page_directory_phys_address: u64) -> Self {
+        assert!(
+            page_directory_phys_address & 0xfff == 0,
+            "Page Directory is not aligned by 4k"
+        );
+
+        // set with present flag
+        Self((page_directory_phys_address & !0xfff) & 0x01)
+    }
+
+    #[inline]
+    pub const fn writable(self) -> Self {
+        Self(self.0 | 0x02)
+    }
+
+    #[inline]
+    pub const fn allow_user(self) -> Self {
+        Self(self.0 | 0x04)
+    }
+
+    #[inline]
+    pub const fn write_through(self) -> Self {
+        Self(self.0 | 0x08)
+    }
+
+    #[inline]
+    pub const fn cache_disable(self) -> Self {
+        Self(self.0 | 0x10)
+    }
+
+    #[inline]
+    pub const fn execute_disable(self) -> Self {
+        Self(self.0 | 0x8000_0000_0000_0000)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PageDirectoryEntry(pub u64);
+impl PageDirectoryEntry {
+    pub const EMPTY: Self = Self(0);
+
+    #[inline]
+    pub const fn new(page_table_phys_address: u64) -> Self {
+        assert!(
+            page_table_phys_address & 0xfff == 0,
+            "Page Table is not aligned by 4k"
+        );
+
+        // set with present flag
+        Self((page_table_phys_address & !0xfff) | 0x01)
+    }
+
+    #[inline]
+    pub const fn writable(self) -> Self {
+        Self(self.0 | 0x02)
+    }
+
+    #[inline]
+    pub const fn allow_user(self) -> Self {
+        Self(self.0 | 0x04)
+    }
+
+    #[inline]
+    pub const fn write_through(self) -> Self {
+        Self(self.0 | 0x08)
+    }
+
+    #[inline]
+    pub const fn cache_disable(self) -> Self {
+        Self(self.0 | 0x10)
+    }
+
+    #[inline]
+    pub const fn execute_disable(self) -> Self {
+        Self(self.0 | 0x8000_0000_0000_0000)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct PageTableEntry(pub u64);
+impl PageTableEntry {
+    pub const EMPTY: Self = Self(0);
+
+    #[inline]
+    pub const fn new(page_phys_address: u64) -> Self {
+        assert!(page_phys_address & 0xfff == 0, "Page is not aligned by 4k");
+
+        // set with present flag
+        Self((page_phys_address & !0xfff) | 0x01)
+    }
+
+    #[inline]
+    pub const fn writable(self) -> Self {
+        Self(self.0 | 0x02)
+    }
+
+    #[inline]
+    pub const fn allow_user(self) -> Self {
+        Self(self.0 | 0x04)
+    }
+
+    #[inline]
+    pub const fn write_through(self) -> Self {
+        Self(self.0 | 0x08)
+    }
+
+    #[inline]
+    pub const fn cache_disable(self) -> Self {
+        Self(self.0 | 0x10)
+    }
+
+    #[inline]
+    pub const fn pat(self) -> Self {
+        Self(self.0 | 0x80)
+    }
+
+    #[inline]
+    pub const fn global(self) -> Self {
+        Self(self.0 | 0x100)
+    }
+
+    #[inline]
+    pub const fn protection_key(self, key: u8) -> Self {
+        Self((self.0 & !(0x0f << 59)) | ((key as u64 & 0x0f) << 59))
+    }
+
+    #[inline]
+    pub const fn execute_disable(self) -> Self {
+        Self(self.0 | 0x8000_0000_0000_0000)
+    }
+}
 
 #[no_mangle]
 fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable) {
@@ -321,6 +665,15 @@ fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable
         framebuffer_stride,
         mode_info.vertical_resolution,
     );
+    unsafe {
+        HIRES_CONSOLE = &mut hrc as _;
+    }
+    writeln!(
+        &mut hrc,
+        "HiResConsole Launched: ScreenRes={}x{}",
+        mode_info.horizontal_resolution, mode_info.vertical_resolution
+    )
+    .unwrap();
 
     let mut memory_map_size = 0;
     let mut memory_map = [];
@@ -345,8 +698,93 @@ fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable
         panic!("ExitBootServices failed: 0x{r:016x}");
     }
 
-    let apic_base = unsafe { rdmsr!(0x1b) };
-    writeln!(&mut hrc, "apic_base register: 0x{apic_base:016x}").unwrap();
+    unsafe {
+        cli!();
+    }
+
+    // paging state
+    let cr0 = unsafe { load_cr!(0) };
+    let cr4 = unsafe { load_cr!(4) };
+    let efer = unsafe { rdmsr!(efer) };
+    writeln!(
+        &mut hrc,
+        "paging state: EFER.LMA={lma}, EFER.LME={lme}, CR0.PG={pg}, CR4.PAE={pae}, CR4.LA57={la57}",
+        lma = (efer & 0x400) != 0,
+        lme = (efer & 0x100) != 0,
+        pg = (cr0 & 0x8000_0000) != 0,
+        pae = (cr4 & 0x20) != 0,
+        la57 = (cr4 & 0x1000) != 0
+    )
+    .unwrap();
+    if (cr4 & 0x1000) != 0 {
+        unimplemented!("Level-5 Paging support");
+    }
+
+    if (cr4 & 0x20000) != 0 {
+        unimplemented!("pcid support");
+    }
+
+    // TODO: ページング再設定するならちゃんとカーネル切り離してロードしたほうがいい（OS Loader自体がどこに入るのかがこっちからはわからないからコードページ設定できない）
+
+    let global_descriptor_table =
+        unsafe { core::slice::from_raw_parts_mut(GDT_PLACEMENT, GDT_ENTRY_COUNT as _) };
+    global_descriptor_table.fill(SegmentDescriptor::new());
+    global_descriptor_table[1] = SegmentDescriptor::new()
+        .base_address(0)
+        .limit(u32::MAX, true)
+        .present()
+        .privilege_level(0)
+        .r#type(0b1000)
+        .code_64bit()
+        .default_operation_32bit()
+        .for_normal_code_data_segment();
+    global_descriptor_table[2] = SegmentDescriptor::new()
+        .base_address(0)
+        .limit(u32::MAX, true)
+        .present()
+        .privilege_level(0)
+        .r#type(0b0010)
+        .code_64bit()
+        .default_operation_32bit()
+        .for_normal_code_data_segment();
+    unsafe {
+        lgdt!(GDT_PLACEMENT, GDT_ENTRY_COUNT - 1);
+    }
+
+    let interrupt_descriptor_table =
+        unsafe { core::slice::from_raw_parts_mut(IDT_PLACEMENT, IDT_ENTRY_COUNT as _) };
+    interrupt_descriptor_table.fill(InterruptGateDescriptor::EMPTY);
+    interrupt_descriptor_table[13] = InterruptGateDescriptor::new_interrupt(
+        SegmentSelector::global(1).requested_privilege_level(0),
+        general_protection_fault as *const extern "system" fn() as _,
+    )
+    .privilege_level(0)
+    .size_32bit();
+    unsafe {
+        lidt!(IDT_PLACEMENT, IDT_ENTRY_COUNT - 1);
+    }
+
+    struct LocalAPIC {
+        base_address: usize,
+    }
+    impl LocalAPIC {
+        pub fn get(con: &mut impl Write) -> Self {
+            let apic_base = unsafe { rdmsr!(0x1b) };
+            writeln!(con, "apic_base register: 0x{apic_base:016x}").unwrap();
+
+            Self {
+                base_address: apic_base as usize & !0xfff,
+            }
+        }
+
+        pub fn read_version_register(&self) -> u32 {
+            unsafe { core::ptr::read_volatile((self.base_address + 0x30) as *const u32) }
+        }
+    }
+
+    let local_apic = LocalAPIC::get(&mut hrc);
+    let v = local_apic.read_version_register();
+    writeln!(&mut hrc, "local apic version: 0x{v:08x}").unwrap();
 
     loop {}
 
@@ -585,5 +1023,14 @@ fn efi_main(efi_handle: uefi::EfiHandle, system_table: *mut uefi::EfiSystemTable
     //     }
     // }
 
+    loop {}
+}
+
+extern "system" fn general_protection_fault() -> ! {
+    writeln!(
+        unsafe { &mut *HIRES_CONSOLE },
+        "[ERR] General Protection Fault!"
+    )
+    .unwrap();
     loop {}
 }
